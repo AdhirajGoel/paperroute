@@ -4,6 +4,8 @@ This is the setup procedure for both humans and coding agents. Work through it i
 
 ## 1. Check the Mac and try the demo
 
+For scheduled use, put the clone in `~/Applications/PaperRoute` or another stable folder outside Desktop, Documents and Downloads. macOS privacy restrictions can prevent unattended access to those folders. Create the virtual environment after placing the clone; virtual environments contain absolute paths.
+
 Use Python 3.11 or later. Check `python3 --version`; if it is missing or older, help the user install Python using their preferred installer. Create a virtual environment in this clone and install the pinned dependency:
 
 ```sh
@@ -12,8 +14,6 @@ python3 -m venv .venv
 .venv/bin/python demo.py
 .venv/bin/python -m unittest discover -s tests -v
 ```
-
-For scheduled use, put the clone in `~/Applications/PaperRoute` or another stable folder outside Desktop, Documents and Downloads. macOS privacy restrictions can prevent unattended access to those folders. Create the virtual environment after placing the clone; virtual environments contain absolute paths.
 
 ## 2. Sign in locally
 
@@ -104,7 +104,7 @@ For another isolated configuration, put `--config /absolute/path/config.json` be
 - **No matching PDF:** check a recent filename and the scan limit. The old issue stays available.
 - **Edited PDF:** move the annotated copy outside the reading and mirror folders. Rerun to restore the managed issue or complete cleanup.
 - **Mirror unavailable:** resolve iCloud access or disk space and rerun. Local downloads remain intact.
-- **Invalid state:** stop the schedule and restore the folder's metadata from a backup. Don't remove `.state.json`, `.paperroute`, or `.mirror.json` to force a run; they define ownership and prevent accidental deletion.
+- **Missing or invalid metadata:** stop the schedule and restore the folder's metadata from a backup. An established folder with missing tracking metadata stops rather than assuming its files are disposable. Don't remove `.state.json`, `.paperroute`, or `.mirror.json` to force a run; they define ownership and prevent accidental deletion.
 - **Another run active:** wait for it to finish. A network run has a ten-minute timeout and bounded connection retries.
 
 To remove PaperRoute, stop its schedule, keep any PDFs you want, then remove its dedicated config, reading, mirror and clone directories. Removing the iCloud folder also removes that copy from other devices.

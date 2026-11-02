@@ -15,11 +15,11 @@ Mirror ready: 3 PDF(s)
 
 READING FOLDER / verified local mirror
   morning-paper/
-    Morning-2026-01-02.pdf
+    5e88cd39af-104-Morning-2026-01-02.pdf
   research-journal/
-    Research-2026-01.pdf
+    5e88cd39af-103-Research-2026-01.pdf
   weekend-review/
-    Weekend-2026-01.pdf
+    5e88cd39af-102-Weekend-2026-01.pdf
 
 PASS / Latest issues kept; previous newspaper removed.
 Synthetic PDFs only. No network, account or iCloud access.

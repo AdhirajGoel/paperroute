@@ -78,7 +78,7 @@ async def demo(root):
     files = sorted(config['mirror_dir'].glob('*/*.pdf'))
     for path in files:
         print(f'  {path.parent.name}/')
-        print(f'    {path.name.split("-", 2)[2]}')
+        print(f'    {path.name}')
     assert len(files) == 3
     assert paper.downloads == magazine.downloads == journal.downloads == replacement.downloads == 1
     assert not any('Morning-2026-01-01' in p.name for p in files)

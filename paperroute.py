@@ -22,6 +22,10 @@ DEFAULT_CONFIG = Path.home() / '.config/paperroute/config.json'
 LABEL = 'com.paperroute.daily'
 
 
+class RecoveryError(ValueError):
+    """Application-defined recovery advice safe to display without account details."""
+
+
 def atomic_write(path, content):
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.paperroute-', dir=path.parent)
@@ -93,6 +97,7 @@ def claim_root(path, identity=None):
     path = safe_path(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker = path / '.paperroute'
+    metadata = path / ('.state.json' if identity is None else '.mirror.json')
     if marker.is_symlink():
         raise ValueError('Refusing a symlink marker')
     if marker.exists():
@@ -100,9 +105,12 @@ def claim_root(path, identity=None):
         uuid.UUID(saved)
         if identity is not None and saved != identity:
             raise ValueError('This mirror belongs to another PaperRoute folder')
+        if not metadata.exists():
+            raise RecoveryError(f'Folder metadata is missing; stop the schedule and restore {metadata.name} from a backup before retrying')
         return saved
     if any(p.name != '.DS_Store' for p in path.iterdir()):
         raise ValueError('Choose an empty folder; PaperRoute will not adopt existing files')
+    write_json(metadata, {'files': {}, 'latest': {}} if identity is None else {})
     identity = identity or str(uuid.uuid4())
     atomic_write(marker, (identity + '\n').encode())
     return identity
@@ -144,7 +152,9 @@ def load_state(root):
     path = root / '.state.json'
     if path.is_symlink():
         raise ValueError('Refusing symlink state')
-    state = read_json(path, {'files': {}, 'latest': {}})
+    if not path.exists():
+        raise RecoveryError('Local metadata is missing; stop the schedule and restore .state.json from a backup before retrying')
+    state = read_json(path)
     if not isinstance(state, dict) or set(state) != {'files', 'latest'} or not isinstance(state['files'], dict) or not isinstance(state['latest'], dict):
         raise ValueError('Invalid state; restore a backup before running cleanup')
     for name, sha in state['files'].items():
@@ -194,9 +204,10 @@ async def deliver(message, publication, root, state, cleanup):
     target = managed_path(root, name)
     target.parent.mkdir(exist_ok=True, mode=0o700)
     if target.exists() and name not in state['files']:
-        raise ValueError('An untracked file occupies the delivery path')
+        raise RecoveryError('An untracked PDF occupies the delivery path and was preserved; move it outside the managed folder and retry')
     if target.exists() and digest(target) != state['files'][name]:
-        raise ValueError('The current managed PDF was edited; preserving it')
+        raise RecoveryError('The current PDF was edited and was preserved; move it outside the managed folder and retry')
+    # shortcut: same-post, same-filename media corrections are ignored; track document identity if corrections enter scope.
     verified = target.is_file() and state['files'].get(name) == digest(target) and valid_pdf(target)
     if not verified:
         fd, tmp = tempfile.mkstemp(prefix='.download-', suffix='.part', dir=target.parent)
@@ -226,7 +237,7 @@ async def deliver(message, publication, root, state, cleanup):
             path = managed_path(root, old)
             if path.exists():
                 if digest(path) != state['files'][old]:
-                    raise ValueError('An older managed PDF was edited; preserving it')
+                    raise RecoveryError('An older PDF was edited and was preserved; move it outside the managed folder and retry')
                 path.unlink()
                 print(f'Removed previous issue: {pub}')
             del state['files'][old]
@@ -241,7 +252,9 @@ def mirror(config, state, identity):
     manifest_path = destination / '.mirror.json'
     if manifest_path.is_symlink():
         raise ValueError('Refusing a symlink mirror manifest')
-    previous = read_json(manifest_path, {})
+    if not manifest_path.exists():
+        raise RecoveryError('Mirror metadata is missing; stop the schedule and restore .mirror.json from a backup before retrying')
+    previous = read_json(manifest_path)
     if not isinstance(previous, dict):
         raise ValueError('Invalid mirror manifest')
     for name, sha in previous.items():
@@ -256,29 +269,36 @@ def mirror(config, state, identity):
         if dst.exists():
             actual = digest(dst)
             if actual == sha:
+                if previous.get(name) != sha:
+                    previous[name] = sha
+                    write_json(manifest_path, previous)
                 continue
             if name not in previous or actual != previous[name]:
-                raise ValueError('A destination PDF was edited; preserving it')
+                raise RecoveryError('A destination PDF was edited or is untracked and was preserved; move it outside the managed folder and retry')
         fd, tmp = tempfile.mkstemp(prefix='.mirror-', dir=dst.parent)
         os.close(fd)
         try:
             shutil.copyfile(src, tmp)
             if digest(Path(tmp)) != sha:
                 raise ValueError('Mirror copy verification failed')
+            # A newly promoted file must already be owned if a later copy fails.
+            if name not in previous:
+                previous[name] = sha
+                write_json(manifest_path, previous)
             os.replace(tmp, dst)
+            if previous[name] != sha:
+                previous[name] = sha
+                write_json(manifest_path, previous)
         finally:
             Path(tmp).unlink(missing_ok=True)
-    # Record newly copied files before deleting old ones, so interrupted runs recover.
-    combined = {**previous, **state['files']}
-    write_json(manifest_path, combined)
     for name in previous.keys() - state['files'].keys():
         path = managed_path(destination, name)
         if path.exists():
             if digest(path) != previous[name]:
-                raise ValueError('An older mirrored PDF was edited; preserving it')
+                raise RecoveryError('An older mirrored PDF was edited and was preserved; move it outside the managed folder and retry')
             path.unlink()
-        del combined[name]
-    write_json(manifest_path, combined)
+        del previous[name]
+    write_json(manifest_path, previous)
     print(f'Mirror ready: {len(state["files"])} PDF(s)')
 
 
@@ -297,7 +317,8 @@ async def run_delivery(client, config):
                 await deliver(message, publication, root, state, config['cleanup_confirmed'])
             except Exception as exc:
                 failed.append(publication['id'])
-                print(f'Failed: {publication["id"]} ({type(exc).__name__}); check access, filters and local files', file=sys.stderr)
+                detail = str(exc) if isinstance(exc, RecoveryError) else f'{type(exc).__name__}; check access, filters and local files'
+                print(f'Failed: {publication["id"]}: {detail}', file=sys.stderr)
         if failed:
             raise RuntimeError('Delivery failed; mirror deferred. Fix the issue and rerun')
         mirror(config, state, identity)
