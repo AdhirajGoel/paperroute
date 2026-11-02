@@ -1,0 +1,13 @@
+{
+  "local_dir": "~/Library/Application Support/PaperRoute/reading",
+  "mirror_dir": "~/Library/Mobile Documents/com~apple~CloudDocs/PaperRoute",
+  "cleanup_confirmed": false,
+  "scan_limit": 500,
+  "publications": [
+    {
+      "id": "morning-paper",
+      "channel": "@your_channel",
+      "patterns": ["Morning*.pdf", "Morning Paper*.pdf"]
+    }
+  ]
+}

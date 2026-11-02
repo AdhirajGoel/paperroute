@@ -1,0 +1,25 @@
+PAPERROUTE / offline demonstration
+
+DAY 1 / Three publications arrive
+Delivered morning-paper: PDF verified
+Delivered weekend-review: PDF verified
+Delivered research-journal: PDF verified
+Mirror ready: 3 PDF(s)
+
+DAY 2 / A new newspaper; monthly issues stay
+Delivered morning-paper: PDF verified
+Removed previous issue: morning-paper
+Up to date: weekend-review
+Up to date: research-journal
+Mirror ready: 3 PDF(s)
+
+READING FOLDER / verified local mirror
+  morning-paper/
+    Morning-2026-01-02.pdf
+  research-journal/
+    Research-2026-01.pdf
+  weekend-review/
+    Weekend-2026-01.pdf
+
+PASS / Latest issues kept; previous newspaper removed.
+Synthetic PDFs only. No network, account or iCloud access.

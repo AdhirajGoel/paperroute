@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env*
+*.session*
+credentials.json
+config.json
+*.log
+*.pdf
+*.part
+.paperroute
+.state.json
+.mirror.json
+.lock
