@@ -54,7 +54,9 @@ Give each publication a distinct lowercase folder ID such as `morning-paper` or 
 }
 ```
 
-Use the full example file for the surrounding settings. The default `scan_limit` of 500 counts recent Telegram posts per publication. Increase it, up to 10000, when an infrequent publication is buried in a busy channel. Restrict patterns carefully: the newest matching post becomes the current issue, including when somebody reposts an older document.
+Use the full example file for the surrounding settings. “Latest” means the newest matching Telegram post, not a date inferred from the document. The default `scan_limit` of 500 counts recent posts per publication. Increase it, up to 10000, when an infrequent publication is buried in a busy channel. Restrict patterns carefully: the newest matching post becomes the current issue, including when somebody reposts an older document.
+
+Once downloaded, an attachment is treated as unchanged when its channel, post ID and filename stay the same. Replacing the attachment on that Telegram post won't trigger another download.
 
 ```sh
 .venv/bin/python paperroute.py validate
@@ -97,6 +99,12 @@ Report the publication aliases, destinations, confirmed retention choice, schedu
 ```
 
 For another isolated configuration, put `--config /absolute/path/config.json` before the subcommand. It uses credentials and a session from that config's directory. Never point it at another application's credential folder.
+
+## How delivery is checked
+
+PaperRoute checks each download's PDF header and expected size, then records a checksum for later verification. It uses that checksum to check saved files and mirror copies.
+
+The download folder is local, so a mirror failure doesn't discard a successful download. A rerun verifies existing files, resumes delivery, and retries the mirror. Edited PDFs are preserved and reported rather than overwritten or deleted. Save annotated copies outside PaperRoute's managed folders if you want cleanup to continue uninterrupted.
 
 ## If a run fails
 
