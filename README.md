@@ -16,9 +16,7 @@ python3 demo.py
 
 The offline demo delivers synthetic newspapers, magazines and journals, replaces yesterday's newspaper, and keeps the monthly reading. It uses temporary folders and needs no Telegram account.
 
-![Second synthetic delivery: the new newspaper arrives, its previous issue is removed, the magazine and journal stay up to date, and the local mirror contains three PDFs.](docs/assets/demo.png)
-
-*An excerpt from the second offline delivery. [Read the full transcript](docs/assets/demo.txt). The demo uses a local mirror; setup verifies iCloud delivery separately.*
+[Read the sample output](docs/assets/demo.txt).
 
 ## Set it up with your agent
 
