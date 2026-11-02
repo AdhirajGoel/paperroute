@@ -108,7 +108,7 @@ def claim_root(path, identity=None):
         if not metadata.exists():
             raise RecoveryError(f'Folder metadata is missing; stop the schedule and restore {metadata.name} from a backup before retrying')
         return saved
-    if any(p.name != '.DS_Store' for p in path.iterdir()):
+    if any(p.name not in ('.lock', '.DS_Store') for p in path.iterdir()):
         raise ValueError('Choose an empty folder; PaperRoute will not adopt existing files')
     write_json(metadata, {'files': {}, 'latest': {}} if identity is None else {})
     identity = identity or str(uuid.uuid4())
@@ -248,64 +248,73 @@ def mirror(config, state, identity):
     source, destination = config['local_dir'], config.get('mirror_dir')
     if destination is None:
         return
-    claim_root(destination, identity)
-    manifest_path = destination / '.mirror.json'
-    if manifest_path.is_symlink():
-        raise ValueError('Refusing a symlink mirror manifest')
-    if not manifest_path.exists():
-        raise RecoveryError('Mirror metadata is missing; stop the schedule and restore .mirror.json from a backup before retrying')
-    previous = read_json(manifest_path)
-    if not isinstance(previous, dict):
-        raise ValueError('Invalid mirror manifest')
-    for name, sha in previous.items():
-        managed_path(destination, name)
-        if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha):
-            raise ValueError('Invalid mirror checksum')
-    for name, sha in state['files'].items():
-        src, dst = managed_path(source, name), managed_path(destination, name)
-        if not src.is_file() or digest(src) != sha or not valid_pdf(src):
-            raise ValueError('Local PDF is missing or changed; mirror cleanup skipped')
-        dst.parent.mkdir(exist_ok=True, mode=0o700)
-        if dst.exists():
-            actual = digest(dst)
-            if actual == sha:
-                if previous.get(name) != sha:
+    destination = safe_path(destination)
+    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with lock_root(destination):
+        claim_root(destination, identity)
+        manifest_path = destination / '.mirror.json'
+        if manifest_path.is_symlink():
+            raise ValueError('Refusing a symlink mirror manifest')
+        if not manifest_path.exists():
+            raise RecoveryError('Mirror metadata is missing; stop the schedule and restore .mirror.json from a backup before retrying')
+        previous = read_json(manifest_path)
+        if not isinstance(previous, dict):
+            raise ValueError('Invalid mirror manifest')
+        for name, sha in previous.items():
+            managed_path(destination, name)
+            if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha):
+                raise ValueError('Invalid mirror checksum')
+        for name, sha in state['files'].items():
+            src, dst = managed_path(source, name), managed_path(destination, name)
+            pub = Path(name).parts[0]
+            if not src.is_file():
+                raise RecoveryError(f'{pub}: a local PDF is missing; move any annotated copy outside managed folders first, then restore the original at the same local path from the mirror or backup before retrying')
+            if digest(src) != sha or not valid_pdf(src):
+                raise RecoveryError(f'{pub}: a local PDF was edited and was preserved; move the annotated copy outside managed folders first, then restore the original at the same local path from the mirror or backup before retrying')
+            dst.parent.mkdir(exist_ok=True, mode=0o700)
+            if dst.exists():
+                if name not in previous:
+                    raise RecoveryError('An untracked destination PDF was preserved; move it outside the managed folder and retry')
+                actual = digest(dst)
+                if actual == sha:
+                    if previous[name] != sha:
+                        previous[name] = sha
+                        write_json(manifest_path, previous)
+                    continue
+                if actual != previous[name]:
+                    raise RecoveryError('A destination PDF was edited and was preserved; move it outside the managed folder and retry')
+            fd, tmp = tempfile.mkstemp(prefix='.mirror-', dir=dst.parent)
+            os.close(fd)
+            try:
+                shutil.copyfile(src, tmp)
+                if digest(Path(tmp)) != sha:
+                    raise ValueError('Mirror copy verification failed')
+                # A newly promoted file must already be owned if a later copy fails.
+                if name not in previous:
                     previous[name] = sha
                     write_json(manifest_path, previous)
-                continue
-            if name not in previous or actual != previous[name]:
-                raise RecoveryError('A destination PDF was edited or is untracked and was preserved; move it outside the managed folder and retry')
-        fd, tmp = tempfile.mkstemp(prefix='.mirror-', dir=dst.parent)
-        os.close(fd)
-        try:
-            shutil.copyfile(src, tmp)
-            if digest(Path(tmp)) != sha:
-                raise ValueError('Mirror copy verification failed')
-            # A newly promoted file must already be owned if a later copy fails.
-            if name not in previous:
-                previous[name] = sha
-                write_json(manifest_path, previous)
-            os.replace(tmp, dst)
-            if previous[name] != sha:
-                previous[name] = sha
-                write_json(manifest_path, previous)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-    for name in previous.keys() - state['files'].keys():
-        path = managed_path(destination, name)
-        if path.exists():
-            if digest(path) != previous[name]:
-                raise RecoveryError('An older mirrored PDF was edited and was preserved; move it outside the managed folder and retry')
-            path.unlink()
-        del previous[name]
-    write_json(manifest_path, previous)
-    print(f'Mirror ready: {len(state["files"])} PDF(s)')
+                os.replace(tmp, dst)
+                if previous[name] != sha:
+                    previous[name] = sha
+                    write_json(manifest_path, previous)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+        for name in previous.keys() - state['files'].keys():
+            path = managed_path(destination, name)
+            if path.exists():
+                if digest(path) != previous[name]:
+                    raise RecoveryError('An older mirrored PDF was edited and was preserved; move it outside the managed folder and retry')
+                path.unlink()
+            del previous[name]
+        write_json(manifest_path, previous)
+        print(f'Mirror ready: {len(state["files"])} PDF(s)')
 
 
 async def run_delivery(client, config):
-    root = config['local_dir']
-    identity = claim_root(root)
+    root = safe_path(config['local_dir'])
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_root(root):
+        identity = claim_root(root)
         state = load_state(root)
         failed = []
         for publication in config['publications']:
@@ -346,6 +355,7 @@ def credentials(directory, interactive=False):
 
 async def telegram_command(args):
     from telethon import TelegramClient
+    from telethon.errors import ApiIdInvalidError
     directory = safe_path(args.config.parent)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if directory.stat().st_mode & 0o077:
@@ -363,15 +373,18 @@ async def telegram_command(args):
                                password=lambda: getpass.getpass('Telegram 2FA password (hidden): '))
             print('Telegram login saved locally. Configure your publications next.')
         else:
-            await client.connect()
-            if not await client.is_user_authorized():
-                raise ValueError('Telegram login is missing or expired; run login interactively')
-            if args.command == 'channels':
-                async for dialog in client.iter_dialogs():
-                    if dialog.is_channel:
-                        print(f'{dialog.id}\t{dialog.name}')
-            else:
-                await asyncio.wait_for(run_delivery(client, load_config(args.config)), timeout=600)
+            async with asyncio.timeout(600):
+                await client.connect()
+                if not await client.is_user_authorized():
+                    raise ValueError('Telegram login is missing or expired; run login interactively')
+                if args.command == 'channels':
+                    async for dialog in client.iter_dialogs():
+                        if dialog.is_channel:
+                            print(f'{dialog.id}\t{dialog.name}')
+                else:
+                    await run_delivery(client, load_config(args.config))
+    except ApiIdInvalidError:
+        raise RecoveryError('Telegram rejected the API ID or hash; remove only credentials.json in your dedicated config directory, keep telegram.session, and rerun login to re-enter the credentials') from None
     finally:
         await client.disconnect()
 

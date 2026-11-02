@@ -108,9 +108,10 @@ The download folder is local, so a mirror failure doesn't discard a successful d
 
 ## If a run fails
 
+- **API credentials rejected:** remove only `credentials.json` from the dedicated config directory, then rerun `login` to enter the API ID and hash again. Keep `telegram.session`.
 - **Login expired:** rerun `login` interactively. Scheduled runs never prompt for credentials.
 - **No matching PDF:** check a recent filename and the scan limit. The old issue stays available.
-- **Edited PDF:** move the annotated copy outside the reading and mirror folders. Rerun to restore the managed issue or complete cleanup.
+- **Edited or missing PDF:** save any annotated copy outside the reading and mirror folders. A rerun can download the newest matching issue again or complete cleanup. If cleanup is disabled and an older local issue is missing or edited, restore its unedited original from the mirror or a backup to the same local path before retrying.
 - **Mirror unavailable:** resolve iCloud access or disk space and rerun. Local downloads remain intact.
 - **Missing or invalid metadata:** stop the schedule and restore the folder's metadata from a backup. An established folder with missing tracking metadata stops rather than assuming its files are disposable. Don't remove `.state.json`, `.paperroute`, or `.mirror.json` to force a run; they define ownership and prevent accidental deletion.
 - **Another run active:** wait for it to finish. A network run has a ten-minute timeout and bounded connection retries.

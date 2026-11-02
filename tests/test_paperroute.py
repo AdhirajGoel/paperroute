@@ -5,8 +5,10 @@ import json
 import plistlib
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import paperroute as pr
 from demo import DemoClient, DemoMessage, demo_config
@@ -286,6 +288,213 @@ class DeliveryTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     asyncio.run(pr.run_delivery(DemoClient([self.old]), self.config))
         self.assertNotIn('PRIVATE-ACCOUNT-DETAIL', stderr.getvalue())
+
+
+    def test_retained_local_edit_has_complete_recovery_instructions(self):
+        self.config['cleanup_confirmed'] = False
+        self.run_delivery([self.old])
+        self.run_delivery([self.new])
+        old = next(p for p in self.local_files() if p.name.endswith('Morning-old.pdf'))
+        mirror_old = self.config['mirror_dir'] / old.relative_to(self.config['local_dir'])
+        original = old.read_bytes()
+        before = (self.config['local_dir'] / '.state.json').read_bytes()
+        old.write_bytes(b'Personal annotations on an older issue')
+        with self.assertRaisesRegex(pr.RecoveryError, 'morning-paper.*edited.*preserved.*restore.*mirror or backup'):
+            self.run_delivery([self.new])
+        self.assertEqual(old.read_bytes(), b'Personal annotations on an older issue')
+        saved = self.root / 'annotated-copy.pdf'
+        old.replace(saved)
+        with self.assertRaisesRegex(pr.RecoveryError, 'morning-paper.*missing.*restore.*mirror or backup'):
+            self.run_delivery([self.new])
+        self.assertEqual(mirror_old.read_bytes(), original)
+        self.assertEqual((self.config['local_dir'] / '.state.json').read_bytes(), before)
+        old.write_bytes(mirror_old.read_bytes())
+        self.run_delivery([self.new])
+        self.assertEqual(len(self.local_files()), 2)
+        self.assertEqual(len(self.mirror_files()), 2)
+        self.assertEqual(saved.read_bytes(), b'Personal annotations on an older issue')
+
+    def test_missing_retained_local_pdf_preserves_mirror_on_no_match(self):
+        self.config['cleanup_confirmed'] = False
+        self.run_delivery([self.old])
+        self.run_delivery([self.new])
+        old = next(p for p in self.local_files() if p.name.endswith('Morning-old.pdf'))
+        before = {p.name: p.read_bytes() for p in self.mirror_files()}
+        old.unlink()
+        with self.assertRaisesRegex(pr.RecoveryError, 'morning-paper.*missing.*restore.*mirror or backup'):
+            self.run_delivery([])
+        self.assertEqual({p.name: p.read_bytes() for p in self.mirror_files()}, before)
+        self.assertEqual(len(pr.load_state(self.config['local_dir'])['files']), 2)
+
+
+    def test_identical_untracked_mirror_file_is_never_adopted(self):
+        destination = self.config['mirror_dir']
+        self.config['mirror_dir'] = None
+        self.run_delivery([self.old])
+        identity = pr.claim_root(self.config['local_dir'])
+        pr.claim_root(destination, identity)
+        local = self.local_files()[0]
+        untracked = destination / local.relative_to(self.config['local_dir'])
+        untracked.parent.mkdir()
+        untracked.write_bytes(local.read_bytes())
+        original = untracked.read_bytes()
+        self.config['mirror_dir'] = destination
+        for messages in ([self.old], []):
+            with self.assertRaisesRegex(pr.RecoveryError, 'untracked.*preserved'):
+                self.run_delivery(messages)
+            self.assertEqual(pr.read_json(destination / '.mirror.json'), {})
+            self.assertEqual(untracked.read_bytes(), original)
+        self.run_delivery([self.new])
+        self.assertEqual(untracked.read_bytes(), original)
+        self.assertNotIn(str(untracked.relative_to(destination)), pr.read_json(destination / '.mirror.json'))
+
+    def test_concurrent_first_local_run_cannot_reinitialize_owner(self):
+        entered, resume = threading.Event(), threading.Event()
+        errors = []
+        write_json = pr.write_json
+        def pause_initialization(path, data):
+            if threading.current_thread().name == 'local-owner' and Path(path).name == '.state.json' and not entered.is_set():
+                entered.set()
+                if not resume.wait(5):
+                    raise RuntimeError('Test initialization timed out')
+            write_json(path, data)
+        def owner():
+            try:
+                asyncio.run(pr.run_delivery(DemoClient([self.old]), self.config))
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(pr, 'write_json', side_effect=pause_initialization), redirect_stdout(StringIO()):
+            thread = threading.Thread(target=owner, name='local-owner')
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(RuntimeError, 'Another PaperRoute run'):
+                    asyncio.run(pr.run_delivery(DemoClient([]), self.config))
+                self.assertFalse((self.config['local_dir'] / '.state.json').exists())
+                self.assertFalse((self.config['local_dir'] / '.paperroute').exists())
+            finally:
+                resume.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(pr.load_state(self.config['local_dir'])['files']), 1)
+        self.assertEqual((self.config['local_dir'] / '.paperroute').read_bytes(),
+                         (self.config['mirror_dir'] / '.paperroute').read_bytes())
+        self.run_delivery([self.old])
+        self.assertEqual(self.old.downloads, 1)
+
+    def test_concurrent_first_mirror_claim_cannot_replace_owner(self):
+        destination = self.config['mirror_dir']
+        self.config['mirror_dir'] = None
+        self.run_delivery([self.old])
+        self.config['mirror_dir'] = destination
+        identity = pr.claim_root(self.config['local_dir'])
+        other = demo_config(self.root / 'other')
+        other_identity = pr.claim_root(other['local_dir'])
+        other['mirror_dir'] = destination
+        entered, resume = threading.Event(), threading.Event()
+        errors = []
+        write_json = pr.write_json
+        def pause_initialization(path, data):
+            if threading.current_thread().name == 'mirror-owner' and Path(path).name == '.mirror.json' and not entered.is_set():
+                entered.set()
+                if not resume.wait(5):
+                    raise RuntimeError('Test initialization timed out')
+            write_json(path, data)
+        def owner():
+            try:
+                pr.mirror(self.config, pr.load_state(self.config['local_dir']), identity)
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(pr, 'write_json', side_effect=pause_initialization), redirect_stdout(StringIO()):
+            thread = threading.Thread(target=owner, name='mirror-owner')
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(RuntimeError, 'Another PaperRoute run'):
+                    pr.mirror(other, pr.load_state(other['local_dir']), other_identity)
+                self.assertFalse((destination / '.mirror.json').exists())
+                self.assertFalse((destination / '.paperroute').exists())
+            finally:
+                resume.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual((destination / '.paperroute').read_text().strip(), identity)
+        self.assertEqual(pr.read_json(destination / '.mirror.json'), pr.load_state(self.config['local_dir'])['files'])
+        with self.assertRaisesRegex(ValueError, 'belongs to another'):
+            pr.mirror(other, pr.load_state(other['local_dir']), other_identity)
+
+
+class TelegramTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = Path(self.tmp.name).resolve()
+        self.directory.chmod(0o700)
+        self.args = SimpleNamespace(config=self.directory / 'config.json', command='run')
+        pr.write_json(self.directory / 'credentials.json', {'api_id': 123, 'api_hash': '0' * 32})
+        self.client = SimpleNamespace(connect=AsyncMock(), is_user_authorized=AsyncMock(return_value=True),
+                                      start=AsyncMock(), disconnect=AsyncMock())
+        self.api_error = type('ApiIdInvalidError', (Exception,), {})
+        modules = {'telethon': SimpleNamespace(TelegramClient=lambda *a, **kw: self.client),
+                   'telethon.errors': SimpleNamespace(ApiIdInvalidError=self.api_error)}
+        mocked = patch.dict(pr.sys.modules, modules)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+
+    def test_network_deadline_covers_startup_and_commands(self):
+        timeout = asyncio.timeout
+        async def hang(*args, **kwargs):
+            await asyncio.Future()
+        async def dialogs():
+            await hang()
+            yield
+        for phase in ('connect', 'is_user_authorized', 'channels', 'delivery'):
+            with self.subTest(phase=phase):
+                self.client.connect = AsyncMock(side_effect=hang if phase == 'connect' else None)
+                self.client.is_user_authorized = AsyncMock(return_value=True, side_effect=hang if phase == 'is_user_authorized' else None)
+                self.client.disconnect.reset_mock()
+                self.client.iter_dialogs = dialogs
+                self.args.command = 'channels' if phase == 'channels' else 'run'
+                with patch.object(pr.asyncio, 'timeout', side_effect=lambda seconds: timeout(0.01)) as deadline:
+                    with patch.object(pr, 'load_config', return_value={}), patch.object(pr, 'run_delivery', side_effect=hang):
+                        async def run():
+                            await asyncio.wait_for(pr.telegram_command(self.args), 0.25)
+                        with self.assertRaises(TimeoutError):
+                            asyncio.run(run())
+                    deadline.assert_called_once_with(600)
+                self.client.disconnect.assert_awaited_once()
+
+    def test_interactive_login_has_no_network_run_deadline(self):
+        self.args.command = 'login'
+        with patch.object(pr.asyncio, 'timeout') as deadline, redirect_stdout(StringIO()):
+            asyncio.run(pr.telegram_command(self.args))
+        deadline.assert_not_called()
+        self.client.start.assert_awaited_once()
+        self.client.disconnect.assert_awaited_once()
+
+    def test_rejected_api_credentials_explain_and_allow_retry(self):
+        self.args.command = 'login'
+        session = self.directory / 'telegram.session'
+        session.write_bytes(b'Synthetic session placeholder')
+        original = (self.directory / 'credentials.json').read_bytes()
+        self.client.start.side_effect = self.api_error('PRIVATE-ACCOUNT-DETAIL')
+        with self.assertRaises(pr.RecoveryError) as caught:
+            asyncio.run(pr.telegram_command(self.args))
+        message = str(caught.exception)
+        for phrase in ('API', 'credentials.json', 'remove only', 'login'):
+            self.assertIn(phrase, message)
+        self.assertNotIn('PRIVATE-ACCOUNT-DETAIL', message)
+        self.assertEqual((self.directory / 'credentials.json').read_bytes(), original)
+        self.assertEqual(session.read_bytes(), b'Synthetic session placeholder')
+        self.client.disconnect.assert_awaited_once()
+        (self.directory / 'credentials.json').unlink()
+        self.client.start.side_effect = None
+        with patch.object(pr.getpass, 'getpass', side_effect=['456', '1' * 32]), redirect_stdout(StringIO()):
+            asyncio.run(pr.telegram_command(self.args))
+        self.assertEqual(pr.read_json(self.directory / 'credentials.json'), {'api_id': 456, 'api_hash': '1' * 32})
+        self.assertEqual(session.read_bytes(), b'Synthetic session placeholder')
 
 
 class ConfigTests(unittest.TestCase):
